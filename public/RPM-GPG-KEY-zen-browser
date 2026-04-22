@@ -1,0 +1,6 @@
+REPLACE THIS FILE WITH YOUR REAL ASCII-ARMORED PUBLIC GPG KEY.
+
+Example:
+  gpg --armor --export <YOUR_KEY_ID> > public/RPM-GPG-KEY-zen-browser
+
+This placeholder intentionally causes the workflow to fail early until the real key is provided.

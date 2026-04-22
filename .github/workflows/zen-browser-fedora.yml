@@ -1,0 +1,412 @@
+name: Build Fedora DNF repo for Zen Browser
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 0 * * *'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: zen-browser-rpm-publish
+  cancel-in-progress: false
+
+env:
+  PAGES_DIR: public
+  PACKAGE_NAME: zen-browser
+  UPSTREAM_REPO: zen-browser/desktop
+  CUSTOM_BASEURL: https://xins3c.github.io/zen-browser-rpm/
+  GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
+
+jobs:
+  build-rpms:
+    name: Build RPMs (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    container: fedora:42
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    outputs:
+      new_release: ${{ steps.check.outputs.no_change == 'false' }}
+      latest_tag: ${{ steps.latest.outputs.tag }}
+    env:
+      CURRENT_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          test -n "${GPG_KEY_ID}" || { echo 'Missing repo variable GPG_KEY_ID'; exit 1; }
+          test -n "${{ secrets.GPG_PRIVATE_KEY }}" || { echo 'Missing secret GPG_PRIVATE_KEY'; exit 1; }
+          test -n "${{ secrets.GPG_PASSPHRASE }}" || { echo 'Missing secret GPG_PASSPHRASE'; exit 1; }
+          test -f public/RPM-GPG-KEY-zen-browser || { echo 'Missing public/RPM-GPG-KEY-zen-browser'; exit 1; }
+          if ! gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | grep -q '^fpr:'; then
+            echo 'public/RPM-GPG-KEY-zen-browser is not a valid public key file'
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          dnf -y install \
+            rpm-build redhat-rpm-config createrepo_c jq curl xz file \
+            findutils sed tar git which rpm-sign gnupg2 shadow-utils
+
+      - name: Import GPG key for RPM signing
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          printf 'pinentry-mode loopback\nbatch\nno-tty\nno-secmem-warning\n' > ~/.gnupg/gpg.conf
+          chmod 600 ~/.gnupg/gpg.conf
+          printf '%s' '${{ secrets.GPG_PASSPHRASE }}' > /tmp/gpg-passphrase
+          chmod 600 /tmp/gpg-passphrase
+          printf '%s' '${{ secrets.GPG_PRIVATE_KEY }}' | gpg --batch --import
+          FPR=$(gpg --list-secret-keys --with-colons "${GPG_KEY_ID}" | awk -F: '/^fpr:/ {print $10; exit}')
+          test -n "$FPR" || { echo 'Unable to extract secret key fingerprint'; exit 1; }
+          printf '%s:6:\n' "$FPR" | gpg --import-ownertrust
+          printf '%%_signature gpg\n%%_gpg_name %s\n%%_gpgbin /usr/bin/gpg\n%%__gpg_sign_cmd %%%%{__gpg} gpg --batch --no-armor --pinentry-mode loopback --passphrase-file /tmp/gpg-passphrase -u "%%%%{_gpg_name}" -sbo %%%%{__signature_filename} --digest-algo sha256 %%%%{__plaintext_filename}\n' "${GPG_KEY_ID}" > ~/.rpmmacros
+          gpg --armor --export "${GPG_KEY_ID}" > /tmp/exported-pubkey.asc
+          rpm --import /tmp/exported-pubkey.asc
+
+      - name: Fetch latest upstream release
+        id: latest
+        run: |
+          set -euo pipefail
+          api_url="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
+          json=$(curl -fsSL "$api_url")
+          tag=$(printf '%s' "$json" | jq -r '.tag_name')
+          test -n "$tag" && test "$tag" != "null" || { echo 'Unable to determine upstream tag'; exit 1; }
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf '%s' "$json" > upstream_latest.json
+
+      - name: Determine if rebuild is needed
+        id: check
+        run: |
+          set -euo pipefail
+          upstream_latest='${{ steps.latest.outputs.tag }}'
+          self_json=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" || echo '{}')
+          self_tag=$(printf '%s' "$self_json" | jq -r '.tag_name // empty')
+          echo "Last built: ${self_tag:-<none>}"
+          echo "Upstream : $upstream_latest"
+          if [ -n "$self_tag" ] && [ "$self_tag" = "$upstream_latest" ]; then
+            printf 'no_change=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'no_change=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare build workspace
+        if: steps.check.outputs.no_change == 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p work/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          printf '%s' '${{ steps.latest.outputs.tag }}' > work/LATEST_TAG
+
+      - name: Download upstream asset
+        if: steps.check.outputs.no_change == 'false'
+        run: |
+          set -euo pipefail
+          case "$CURRENT_ARCH" in
+            x86_64) asset='zen.linux-x86_64.tar.xz' ;;
+            aarch64) asset='zen.linux-aarch64.tar.xz' ;;
+            *) echo "Unsupported arch: $CURRENT_ARCH"; exit 1 ;;
+          esac
+          url=$(jq -r --arg name "$asset" '.assets[] | select(.name==$name) | .browser_download_url' upstream_latest.json)
+          size=$(jq -r --arg name "$asset" '.assets[] | select(.name==$name) | .size' upstream_latest.json)
+          test -n "$url" && test "$url" != "null" || { echo "Asset URL not found for $asset"; exit 1; }
+          curl -fL --retry 3 --retry-delay 2 "$url" -o "work/rpmbuild/SOURCES/${asset}"
+          actual_size=$(stat -c '%s' "work/rpmbuild/SOURCES/${asset}")
+          [ "$actual_size" -gt 0 ] || { echo 'Downloaded asset is empty'; exit 1; }
+          [ "$size" = "$actual_size" ] || { echo "Size mismatch for $asset: expected $size got $actual_size"; exit 1; }
+          file "work/rpmbuild/SOURCES/${asset}"
+          tar -tf "work/rpmbuild/SOURCES/${asset}" >/dev/null
+          sha256sum "work/rpmbuild/SOURCES/${asset}"
+
+      - name: Generate packaging files
+        if: steps.check.outputs.no_change == 'false'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          sources = Path('work/rpmbuild/SOURCES')
+          specs = Path('work/rpmbuild/SPECS')
+          sources.mkdir(parents=True, exist_ok=True)
+          specs.mkdir(parents=True, exist_ok=True)
+
+          desktop = textwrap.dedent('''\
+          [Desktop Entry]
+          Version=1.0
+          Name=Zen Browser
+          GenericName=Web Browser
+          Comment=Experience tranquillity while browsing the web without people tracking you!
+          Exec=zen-browser %u
+          StartupWMClass=zen
+          Icon=zen-browser
+          Terminal=false
+          Type=Application
+          Categories=Network;WebBrowser;
+          MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;application/x-xpinstall;application/pdf;application/json;
+          StartupNotify=true
+          Actions=new-window;new-private-window;
+
+          [Desktop Action new-window]
+          Name=Open a New Window
+          Exec=zen-browser --new-window %u
+
+          [Desktop Action new-private-window]
+          Name=Open a New Private Window
+          Exec=zen-browser --private-window %u
+          ''')
+
+          launcher = textwrap.dedent('''\
+          #!/usr/bin/bash
+          set -euo pipefail
+
+          if [ -z "${MOZ_DISABLE_WAYLAND:-}" ] && { [ "${XDG_CURRENT_DESKTOP:-}" = "GNOME" ] && [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; }; then
+            export MOZ_ENABLE_WAYLAND=1
+            export MOZ_DBUS_REMOTE=1
+          fi
+
+          if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ] && [ ! -e "${HOME}/.zen/native-messaging-hosts/org.kde.plasma.browser_integration.json" ]; then
+            mkdir -p "${HOME}/.zen/native-messaging-hosts"
+            [ -r /usr/lib64/mozilla/native-messaging-hosts/org.kde.plasma.browser_integration.json ] && ln -sf /usr/lib64/mozilla/native-messaging-hosts/org.kde.plasma.browser_integration.json "${HOME}/.zen/native-messaging-hosts/org.kde.plasma.browser_integration.json" || true
+          fi
+
+          if [ "${XDG_CURRENT_DESKTOP:-}" = "GNOME" ]; then
+            mkdir -p "${HOME}/.zen/native-messaging-hosts"
+            [ -r /usr/lib64/mozilla/native-messaging-hosts/org.gnome.browser_connector.json ] && ln -sf /usr/lib64/mozilla/native-messaging-hosts/org.gnome.browser_connector.json "${HOME}/.zen/native-messaging-hosts/org.gnome.browser_connector.json" || true
+            [ -r /usr/lib64/mozilla/native-messaging-hosts/org.gnome.chrome_gnome_shell.json ] && ln -sf /usr/lib64/mozilla/native-messaging-hosts/org.gnome.chrome_gnome_shell.json "${HOME}/.zen/native-messaging-hosts/org.gnome.chrome_gnome_shell.json" || true
+          fi
+
+          export MOZ_APP_LAUNCHER="${0}"
+
+          if [ -x "/opt/zen-browser/zen" ]; then
+            exec /opt/zen-browser/zen "$@"
+          elif [ -x "/opt/zen-browser/zen-bin" ]; then
+            exec /opt/zen-browser/zen-bin "$@"
+          elif [ -x "/opt/zen-browser/firefox" ]; then
+            exec /opt/zen-browser/firefox "$@"
+          fi
+
+          found="$(find /opt/zen-browser -maxdepth 1 -type f -perm -u=x | head -n1 || true)"
+          [ -n "$found" ] && exec "$found" "$@"
+          echo 'Error: could not find zen executable in /opt/zen-browser' >&2
+          exit 1
+          ''')
+
+          spec = textwrap.dedent('''\
+          %global _build_id_links none
+
+          Name:           zen-browser
+          Version:        RPM_VERSION_PLACEHOLDER
+          Release:        1%{?dist}
+          Summary:        Zen Browser packaged for Fedora
+          License:        MPL-2.0
+          URL:            https://github.com/zen-browser/desktop
+          Source0:        SOURCE_TARBALL_PLACEHOLDER
+          Source1:        zen-browser.desktop
+          Source2:        zen-browser-launcher.sh
+          Requires:       /bin/bash
+          Provides:       zen-browser
+
+          %description
+          Zen Browser packaged for Fedora. Installs under /opt/zen-browser with /usr/bin/zen-browser as the primary launcher and /usr/bin/zen as a convenience symlink.
+
+          %prep
+
+          %build
+
+          %install
+          rm -rf %{buildroot}
+          mkdir -p %{buildroot}/opt/zen-browser
+          mkdir -p %{buildroot}%{_bindir}
+          mkdir -p %{buildroot}%{_datadir}/applications
+          mkdir -p %{buildroot}%{_datadir}/pixmaps
+
+          tar -xf %{SOURCE0} -C %{buildroot}/opt/zen-browser --strip-components=1
+          test -f %{buildroot}/opt/zen-browser/application.ini
+
+          install -m 0755 %{SOURCE2} %{buildroot}%{_bindir}/zen-browser
+          ln -sf zen-browser %{buildroot}%{_bindir}/zen
+          cp %{buildroot}/opt/zen-browser/browser/chrome/icons/default/default128.png %{buildroot}%{_datadir}/pixmaps/zen-browser.png
+          install -m 0644 %{SOURCE1} %{buildroot}%{_datadir}/applications/zen-browser.desktop
+
+          %files
+          /opt/zen-browser
+          %{_bindir}/zen
+          %{_bindir}/zen-browser
+          %{_datadir}/applications/zen-browser.desktop
+          %{_datadir}/pixmaps/zen-browser.png
+
+          %changelog
+          * Tue Apr 22 2026 GitHub Actions <actions@github.com> - RPM_VERSION_PLACEHOLDER-1
+          - Automated build from upstream release.
+          ''')
+
+          (sources / 'zen-browser.desktop').write_text(desktop)
+          launcher_path = sources / 'zen-browser-launcher.sh'
+          launcher_path.write_text(launcher)
+          launcher_path.chmod(0o755)
+          (specs / 'zen-browser.spec').write_text(spec)
+          PY
+
+      - name: Build and sign RPM
+        if: steps.check.outputs.no_change == 'false'
+        run: |
+          set -euo pipefail
+          rpm_version="$(sed 's/^v//' work/LATEST_TAG)"
+          case "$CURRENT_ARCH" in
+            x86_64) asset='zen.linux-x86_64.tar.xz' ;;
+            aarch64) asset='zen.linux-aarch64.tar.xz' ;;
+          esac
+          sed \
+            -e "s|RPM_VERSION_PLACEHOLDER|${rpm_version}|g" \
+            -e "s|SOURCE_TARBALL_PLACEHOLDER|${asset}|g" \
+            work/rpmbuild/SPECS/zen-browser.spec > work/rpmbuild/SPECS/zen-browser-${CURRENT_ARCH}.spec
+          QA_RPATHS=0x0002 rpmbuild \
+            --define "_topdir $PWD/work/rpmbuild" \
+            --target "$CURRENT_ARCH" \
+            --nodeps \
+            -bb work/rpmbuild/SPECS/zen-browser-${CURRENT_ARCH}.spec
+          find work/rpmbuild/RPMS -type f -name '*.rpm' -print -exec rpm --addsign {} \; -exec rpm -K {} \;
+
+      - name: Upload RPM artifacts
+        if: steps.check.outputs.no_change == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.arch }}
+          path: work/rpmbuild/RPMS
+
+      - name: Cleanup sensitive data
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f /tmp/gpg-passphrase /tmp/exported-pubkey.asc
+          rm -rf ~/.gnupg
+          rm -f ~/.rpmmacros
+
+  aggregate-and-deploy:
+    name: Aggregate, sign repo metadata, deploy Pages and release
+    runs-on: ubuntu-latest
+    container: fedora:42
+    needs: build-rpms
+    if: needs.build-rpms.outputs.new_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          test -n "${GPG_KEY_ID}" || { echo 'Missing repo variable GPG_KEY_ID'; exit 1; }
+          test -n "${{ secrets.GPG_PRIVATE_KEY }}" || { echo 'Missing secret GPG_PRIVATE_KEY'; exit 1; }
+          test -n "${{ secrets.GPG_PASSPHRASE }}" || { echo 'Missing secret GPG_PASSPHRASE'; exit 1; }
+          test -f public/RPM-GPG-KEY-zen-browser || { echo 'Missing public/RPM-GPG-KEY-zen-browser'; exit 1; }
+          if ! gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | grep -q '^fpr:'; then
+            echo 'public/RPM-GPG-KEY-zen-browser is not a valid public key file'
+            exit 1
+          fi
+
+      - name: Download RPM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: aggregated-rpms
+
+      - name: Install repo dependencies
+        run: |
+          set -euo pipefail
+          dnf -y install createrepo_c gnupg2 curl jq rpm-sign
+
+      - name: Import GPG key for metadata signing
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          printf 'pinentry-mode loopback\nbatch\nno-tty\nno-secmem-warning\n' > ~/.gnupg/gpg.conf
+          chmod 600 ~/.gnupg/gpg.conf
+          printf '%s' '${{ secrets.GPG_PASSPHRASE }}' > /tmp/gpg-passphrase
+          chmod 600 /tmp/gpg-passphrase
+          printf '%s' '${{ secrets.GPG_PRIVATE_KEY }}' | gpg --batch --import
+          FPR=$(gpg --list-secret-keys --with-colons "${GPG_KEY_ID}" | awk -F: '/^fpr:/ {print $10; exit}')
+          test -n "$FPR" || { echo 'Unable to extract secret key fingerprint'; exit 1; }
+          printf '%s:6:\n' "$FPR" | gpg --import-ownertrust
+
+      - name: Verify public key matches signing key
+        run: |
+          set -euo pipefail
+          EXPORTED_FP=$(gpg --armor --export "${GPG_KEY_ID}" | gpg --with-colons --import-options show-only --import 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')
+          STATIC_FP=$(gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')
+          test -n "$EXPORTED_FP" && test -n "$STATIC_FP" || { echo 'Could not extract fingerprints'; exit 1; }
+          [ "$EXPORTED_FP" = "$STATIC_FP" ] || { echo "Public key mismatch: $STATIC_FP != $EXPORTED_FP"; exit 1; }
+
+      - name: Build DNF repository
+        run: |
+          set -euo pipefail
+          mkdir -p "$PAGES_DIR"
+          find aggregated-rpms -type f -name '*.rpm' -exec cp -v {} "$PAGES_DIR"/ \;
+          createrepo_c "$PAGES_DIR"
+          gpg --batch --yes --pinentry-mode loopback --passphrase-file /tmp/gpg-passphrase \
+            --detach-sign --armor "$PAGES_DIR/repodata/repomd.xml"
+          gpg --verify "$PAGES_DIR/repodata/repomd.xml.asc" "$PAGES_DIR/repodata/repomd.xml"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PAGES_DIR }}
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build-rpms.outputs.latest_tag }}
+          name: Zen Browser ${{ needs.build-rpms.outputs.latest_tag }}
+          body: |
+            Upstream release: https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ needs.build-rpms.outputs.latest_tag }}
+
+            Base URL:
+            `${{ env.CUSTOM_BASEURL }}`
+
+            Install:
+            ```bash
+            sudo rpm --import ${{ env.CUSTOM_BASEURL }}RPM-GPG-KEY-zen-browser
+            sudo tee /etc/yum.repos.d/zen-browser.repo > /dev/null << 'REPO'
+            [zen-browser]
+            name=Zen Browser
+            baseurl=${{ env.CUSTOM_BASEURL }}
+            enabled=1
+            gpgcheck=1
+            repo_gpgcheck=1
+            gpgkey=${{ env.CUSTOM_BASEURL }}RPM-GPG-KEY-zen-browser
+            skip_if_unavailable=True
+            metadata_expire=6h
+            REPO
+            sudo dnf clean all
+            sudo dnf install -y zen-browser
+            ```
+          files: |
+            public/*.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup sensitive data
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f /tmp/gpg-passphrase
+          rm -rf ~/.gnupg
