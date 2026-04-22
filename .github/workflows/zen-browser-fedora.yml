@@ -56,7 +56,7 @@ jobs:
           set -euo pipefail
           dnf -y install \
             rpm-build redhat-rpm-config createrepo_c jq curl xz file \
-            findutils sed tar git which rpm-sign gnupg2 shadow-utils
+            findutils sed tar git which rpm-sign gnupg2 shadow-utils python3
 
       - name: Validate public GPG key format
         run: |
