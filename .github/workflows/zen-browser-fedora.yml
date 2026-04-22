@@ -324,6 +324,11 @@ jobs:
           test -n "${{ secrets.GPG_PASSPHRASE }}" || { echo 'Missing secret GPG_PASSPHRASE'; exit 1; }
           test -f public/RPM-GPG-KEY-zen-browser || { echo 'Missing public/RPM-GPG-KEY-zen-browser'; exit 1; }
 
+      - name: Install repo dependencies
+        run: |
+          set -euo pipefail
+          dnf -y install createrepo_c gnupg2 curl jq rpm-sign
+
       - name: Download RPM artifacts from current run
         if: needs.build-rpms.outputs.new_release == 'true'
         uses: actions/download-artifact@v4
@@ -352,11 +357,6 @@ jobs:
           find aggregated-rpms -type f -name '*.rpm' | grep -q . || {
             echo 'No RPM files downloaded from latest release'; exit 1;
           }
-
-      - name: Install repo dependencies
-        run: |
-          set -euo pipefail
-          dnf -y install createrepo_c gnupg2 curl jq rpm-sign
 
       - name: Validate public GPG key format
         run: |
