@@ -31,7 +31,6 @@ concurrency:
 
 env:
   PAGES_DIR: public
-  PACKAGE_NAME: zen-browser
   UPSTREAM_REPO: zen-browser/desktop
   CUSTOM_BASEURL: https://xins3c.github.io/zen-browser-rpm/
   GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
@@ -331,7 +330,7 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora:42
     needs: build-rpms
-    if: needs.build-rpms.outputs.new_release == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.build-rpms.outputs.new_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.republish_pages)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -407,6 +406,19 @@ jobs:
           test -n "$EXPORTED_FP" && test -n "$STATIC_FP" || { echo 'Could not extract fingerprints'; exit 1; }
           [ "$EXPORTED_FP" = "$STATIC_FP" ] || { echo "Public key mismatch: $STATIC_FP != $EXPORTED_FP"; exit 1; }
 
+      - name: Verify downloaded RPM signatures before publishing
+        run: |
+          set -euo pipefail
+          find aggregated-rpms -type f -name '*.rpm' | grep -q . || {
+            echo 'No RPM files available for publication'; exit 1;
+          }
+          find aggregated-rpms -type f -name '*.rpm' | while read -r rpm_file; do
+            echo "Verifying RPM signature: $rpm_file"
+            rpm -Kv "$rpm_file"
+            rpm -qp --qf 'RSAHEADER:%{RSAHEADER:pgpsig}\nSIGPGP:%{SIGPGP:pgpsig}\n' "$rpm_file" | grep -qv '(none)' \
+              || { echo "RPM is unsigned and cannot be published: $rpm_file"; exit 1; }
+          done
+
       - name: Build DNF repository
         run: |
           set -euo pipefail
@@ -444,9 +456,13 @@ jobs:
             Base URL:
             `${{ env.CUSTOM_BASEURL }}`
 
-            Install:
+            Recommended install:
             ```bash
-            sudo rpm --import ${{ env.CUSTOM_BASEURL }}RPM-GPG-KEY-zen-browser
+            sudo mkdir -p /etc/pki/rpm-gpg
+            sudo curl -fsSL ${{ env.CUSTOM_BASEURL }}RPM-GPG-KEY-zen-browser \
+              -o /etc/pki/rpm-gpg/RPM-GPG-KEY-zen-browser
+            sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-zen-browser
+
             sudo tee /etc/yum.repos.d/zen-browser.repo > /dev/null << 'REPO'
             [zen-browser]
             name=Zen Browser
@@ -454,11 +470,13 @@ jobs:
             enabled=1
             gpgcheck=1
             repo_gpgcheck=1
-            gpgkey=${{ env.CUSTOM_BASEURL }}RPM-GPG-KEY-zen-browser
+            gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-zen-browser
             skip_if_unavailable=True
             metadata_expire=6h
             REPO
+
             sudo dnf clean all
+            sudo dnf makecache --refresh
             sudo dnf install -y zen-browser
             ```
           files: |
