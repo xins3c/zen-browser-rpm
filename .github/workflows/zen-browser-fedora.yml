@@ -8,6 +8,11 @@ on:
         required: false
         default: true
         type: boolean
+      force_rebuild:
+        description: 'Force RPM rebuild and replace release assets even if upstream tag did not change'
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '0 0 * * *'
 
@@ -112,9 +117,13 @@ jobs:
           upstream_latest='${{ steps.latest.outputs.tag }}'
           self_json=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" || echo '{}')
           self_tag=$(printf '%s' "$self_json" | jq -r '.tag_name // empty')
+          force_rebuild='${{ github.event.inputs.force_rebuild || 'false' }}'
           echo "Last built: ${self_tag:-<none>}"
           echo "Upstream : $upstream_latest"
-          if [ -n "$self_tag" ] && [ "$self_tag" = "$upstream_latest" ]; then
+          echo "Force rebuild: $force_rebuild"
+          if [ "$force_rebuild" = 'true' ]; then
+            printf 'no_change=false\n' >> "$GITHUB_OUTPUT"
+          elif [ -n "$self_tag" ] && [ "$self_tag" = "$upstream_latest" ]; then
             printf 'no_change=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'no_change=false\n' >> "$GITHUB_OUTPUT"
@@ -428,6 +437,7 @@ jobs:
         with:
           tag_name: ${{ needs.build-rpms.outputs.latest_tag }}
           name: Zen Browser ${{ needs.build-rpms.outputs.latest_tag }}
+          overwrite_files: true
           body: |
             Upstream release: https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ needs.build-rpms.outputs.latest_tag }}
 
