@@ -10,6 +10,10 @@ permissions:
   pages: write
   id-token: write
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: zen-browser-rpm-publish
   cancel-in-progress: false
@@ -46,10 +50,6 @@ jobs:
           test -n "${{ secrets.GPG_PRIVATE_KEY }}" || { echo 'Missing secret GPG_PRIVATE_KEY'; exit 1; }
           test -n "${{ secrets.GPG_PASSPHRASE }}" || { echo 'Missing secret GPG_PASSPHRASE'; exit 1; }
           test -f public/RPM-GPG-KEY-zen-browser || { echo 'Missing public/RPM-GPG-KEY-zen-browser'; exit 1; }
-          if ! gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | grep -q '^fpr:'; then
-            echo 'public/RPM-GPG-KEY-zen-browser is not a valid public key file'
-            exit 1
-          fi
 
       - name: Install build dependencies
         run: |
@@ -57,6 +57,13 @@ jobs:
           dnf -y install \
             rpm-build redhat-rpm-config createrepo_c jq curl xz file \
             findutils sed tar git which rpm-sign gnupg2 shadow-utils
+
+      - name: Validate public GPG key format
+        run: |
+          set -euo pipefail
+          command -v gpg >/dev/null 2>&1 || { echo 'gpg is not installed'; exit 1; }
+          gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | grep -q '^fpr:' \
+            || { echo 'public/RPM-GPG-KEY-zen-browser is not a valid public key file'; exit 1; }
 
       - name: Import GPG key for RPM signing
         run: |
@@ -310,10 +317,6 @@ jobs:
           test -n "${{ secrets.GPG_PRIVATE_KEY }}" || { echo 'Missing secret GPG_PRIVATE_KEY'; exit 1; }
           test -n "${{ secrets.GPG_PASSPHRASE }}" || { echo 'Missing secret GPG_PASSPHRASE'; exit 1; }
           test -f public/RPM-GPG-KEY-zen-browser || { echo 'Missing public/RPM-GPG-KEY-zen-browser'; exit 1; }
-          if ! gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | grep -q '^fpr:'; then
-            echo 'public/RPM-GPG-KEY-zen-browser is not a valid public key file'
-            exit 1
-          fi
 
       - name: Download RPM artifacts
         uses: actions/download-artifact@v4
@@ -324,6 +327,13 @@ jobs:
         run: |
           set -euo pipefail
           dnf -y install createrepo_c gnupg2 curl jq rpm-sign
+
+      - name: Validate public GPG key format
+        run: |
+          set -euo pipefail
+          command -v gpg >/dev/null 2>&1 || { echo 'gpg is not installed'; exit 1; }
+          gpg --with-colons --import-options show-only --import public/RPM-GPG-KEY-zen-browser 2>/dev/null | grep -q '^fpr:' \
+            || { echo 'public/RPM-GPG-KEY-zen-browser is not a valid public key file'; exit 1; }
 
       - name: Import GPG key for metadata signing
         run: |
