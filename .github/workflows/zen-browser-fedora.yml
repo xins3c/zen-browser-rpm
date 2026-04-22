@@ -397,6 +397,8 @@ jobs:
           FPR=$(gpg --list-secret-keys --with-colons "${GPG_KEY_ID}" | awk -F: '/^fpr:/ {print $10; exit}')
           test -n "$FPR" || { echo 'Unable to extract secret key fingerprint'; exit 1; }
           printf '%s:6:\n' "$FPR" | gpg --import-ownertrust
+          gpg --armor --export "${GPG_KEY_ID}" > /tmp/exported-pubkey.asc
+          rpm --import /tmp/exported-pubkey.asc
 
       - name: Verify public key matches signing key
         run: |
@@ -488,5 +490,5 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          rm -f /tmp/gpg-passphrase
+          rm -f /tmp/gpg-passphrase /tmp/exported-pubkey.asc
           rm -rf ~/.gnupg
