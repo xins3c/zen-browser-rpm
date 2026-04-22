@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zen Browser RPM Repo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; line-height: 1.5; color: #e6e6e6; background: #111; }
+    code, pre { background: #1d1d1d; padding: 2px 6px; border-radius: 6px; }
+    pre { padding: 12px; overflow: auto; }
+    a { color: #7cc4ff; }
+    .box { background: #181818; border: 1px solid #2a2a2a; border-radius: 10px; padding: 16px; margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <h1>Zen Browser RPM Repo</h1>
+  <p>Signed RPM repository for Fedora.</p>
+
+  <div class="box">
+    <h2>Important files</h2>
+    <ul>
+      <li><a href="./RPM-GPG-KEY-zen-browser">RPM-GPG-KEY-zen-browser</a></li>
+      <li><a href="./repodata/repomd.xml">repodata/repomd.xml</a></li>
+      <li><a href="./repodata/repomd.xml.asc">repodata/repomd.xml.asc</a></li>
+    </ul>
+  </div>
+
+  <div class="box">
+    <h2>Install</h2>
+    <pre><code>sudo rpm --import https://xins3c.github.io/zen-browser-rpm/RPM-GPG-KEY-zen-browser
+
+sudo tee /etc/yum.repos.d/zen-browser.repo &gt; /dev/null &lt;&lt; 'REPO'
+[zen-browser]
+name=Zen Browser
+baseurl=https://xins3c.github.io/zen-browser-rpm/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://xins3c.github.io/zen-browser-rpm/RPM-GPG-KEY-zen-browser
+skip_if_unavailable=True
+metadata_expire=6h
+REPO
+
+sudo dnf clean all
+sudo dnf makecache
+sudo dnf install -y zen-browser</code></pre>
+  </div>
+</body>
+</html>

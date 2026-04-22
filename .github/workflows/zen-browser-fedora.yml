@@ -1,7 +1,13 @@
 name: Build Fedora DNF repo for Zen Browser
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      republish_pages:
+        description: 'Republish Pages and static files even if no new upstream release exists'
+        required: false
+        default: true
+        type: boolean
   schedule:
     - cron: '0 0 * * *'
 
@@ -305,7 +311,7 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora:42
     needs: build-rpms
-    if: needs.build-rpms.outputs.new_release == 'true'
+    if: needs.build-rpms.outputs.new_release == 'true' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -318,10 +324,34 @@ jobs:
           test -n "${{ secrets.GPG_PASSPHRASE }}" || { echo 'Missing secret GPG_PASSPHRASE'; exit 1; }
           test -f public/RPM-GPG-KEY-zen-browser || { echo 'Missing public/RPM-GPG-KEY-zen-browser'; exit 1; }
 
-      - name: Download RPM artifacts
+      - name: Download RPM artifacts from current run
+        if: needs.build-rpms.outputs.new_release == 'true'
         uses: actions/download-artifact@v4
         with:
           path: aggregated-rpms
+
+      - name: Download RPM artifacts from latest GitHub release
+        if: needs.build-rpms.outputs.new_release != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p aggregated-rpms/from-release
+          release_json=$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ needs.build-rpms.outputs.latest_tag }}")
+          printf '%s' "$release_json" | jq -e '.assets | length > 0' >/dev/null || {
+            echo 'No release assets found to republish'; exit 1;
+          }
+          printf '%s' "$release_json" | jq -r '.assets[] | select(.name | endswith(".rpm")) | [.name, .browser_download_url] | @tsv' | \
+          while IFS=$'\t' read -r name url; do
+            echo "Downloading release asset: $name"
+            curl -fL --retry 3 --retry-delay 2 "$url" -o "aggregated-rpms/from-release/$name"
+          done
+          find aggregated-rpms -type f -name '*.rpm' | grep -q . || {
+            echo 'No RPM files downloaded from latest release'; exit 1;
+          }
 
       - name: Install repo dependencies
         run: |
@@ -382,6 +412,7 @@ jobs:
         uses: actions/deploy-pages@v4
 
       - name: Create GitHub release
+        if: needs.build-rpms.outputs.new_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.build-rpms.outputs.latest_tag }}
