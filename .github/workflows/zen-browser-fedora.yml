@@ -51,7 +51,9 @@ jobs:
       CURRENT_ARCH: ${{ matrix.arch }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Validate configuration
         run: |
@@ -146,11 +148,31 @@ jobs:
           esac
           url=$(jq -r --arg name "$asset" '.assets[] | select(.name==$name) | .browser_download_url' upstream_latest.json)
           size=$(jq -r --arg name "$asset" '.assets[] | select(.name==$name) | .size' upstream_latest.json)
+          digest=$(jq -r --arg name "$asset" '.assets[] | select(.name==$name) | .digest // empty' upstream_latest.json)
           test -n "$url" && test "$url" != "null" || { echo "Asset URL not found for $asset"; exit 1; }
           curl -fL --retry 3 --retry-delay 2 "$url" -o "work/rpmbuild/SOURCES/${asset}"
           actual_size=$(stat -c '%s' "work/rpmbuild/SOURCES/${asset}")
           [ "$actual_size" -gt 0 ] || { echo 'Downloaded asset is empty'; exit 1; }
           [ "$size" = "$actual_size" ] || { echo "Size mismatch for $asset: expected $size got $actual_size"; exit 1; }
+          if [ -n "$digest" ]; then
+            case "$digest" in
+              sha256:*)
+                expected_sha256="${digest#sha256:}"
+                actual_sha256=$(sha256sum "work/rpmbuild/SOURCES/${asset}" | awk '{print $1}')
+                [ "$actual_sha256" = "$expected_sha256" ] || {
+                  echo "SHA256 mismatch for $asset: expected $expected_sha256 got $actual_sha256"
+                  exit 1
+                }
+                ;;
+              *)
+                echo "Unsupported upstream digest format for $asset: $digest"
+                exit 1
+                ;;
+            esac
+          else
+            echo "Missing upstream digest for $asset"
+            exit 1
+          fi
           file "work/rpmbuild/SOURCES/${asset}"
           tar -tf "work/rpmbuild/SOURCES/${asset}" >/dev/null
           sha256sum "work/rpmbuild/SOURCES/${asset}"
@@ -333,7 +355,9 @@ jobs:
     if: needs.build-rpms.outputs.new_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.republish_pages)
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Validate configuration
         run: |
@@ -432,22 +456,22 @@ jobs:
           gpg --verify "$PAGES_DIR/repodata/repomd.xml.asc" "$PAGES_DIR/repodata/repomd.xml"
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
         with:
           enablement: true
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: ${{ env.PAGES_DIR }}
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
       - name: Create GitHub release
         if: needs.build-rpms.outputs.new_release == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.build-rpms.outputs.latest_tag }}
           name: Zen Browser ${{ needs.build-rpms.outputs.latest_tag }}

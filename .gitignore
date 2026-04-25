@@ -1,0 +1,12 @@
+work/
+aggregated-rpms/
+upstream_latest.json
+*.rpm
+repodata/
+*.log
+.env
+.env.*
+*.key
+*.gpg
+*.asc
+!/public/RPM-GPG-KEY-zen-browser

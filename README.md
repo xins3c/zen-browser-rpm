@@ -31,8 +31,11 @@ Current protections include:
 - repository metadata is signed with the same GPG identity used for RPM signing
 - the published public key must match the imported private key fingerprint
 - RPM publication stops if downloaded or rebuilt RPMs do not actually contain a signature
+- upstream release tarballs must match the SHA-256 digest published by the GitHub Releases API before packaging continues
 - static Pages republish can be triggered manually without waiting for a new upstream release
 - `GPG_KEY_ID` is stored as a repository variable, not a secret
+- `actions/checkout` runs with `persist-credentials: false`
+- third-party GitHub Actions are pinned to commit SHAs instead of mutable version tags
 - packaging helper files are generated with Python instead of fragile YAML heredocs
 
 ## Repository configuration

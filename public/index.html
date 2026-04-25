@@ -27,7 +27,11 @@
 
   <div class="box">
     <h2>Install</h2>
-    <pre><code>sudo rpm --import https://xins3c.github.io/zen-browser-rpm/RPM-GPG-KEY-zen-browser
+    <pre><code>sudo mkdir -p /etc/pki/rpm-gpg
+
+sudo curl -fsSL https://xins3c.github.io/zen-browser-rpm/RPM-GPG-KEY-zen-browser \
+  -o /etc/pki/rpm-gpg/RPM-GPG-KEY-zen-browser
+sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-zen-browser
 
 sudo tee /etc/yum.repos.d/zen-browser.repo &gt; /dev/null &lt;&lt; 'REPO'
 [zen-browser]
@@ -36,13 +40,13 @@ baseurl=https://xins3c.github.io/zen-browser-rpm/
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://xins3c.github.io/zen-browser-rpm/RPM-GPG-KEY-zen-browser
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-zen-browser
 skip_if_unavailable=True
 metadata_expire=6h
 REPO
 
 sudo dnf clean all
-sudo dnf makecache
+sudo dnf makecache --refresh
 sudo dnf install -y zen-browser</code></pre>
   </div>
 </body>
