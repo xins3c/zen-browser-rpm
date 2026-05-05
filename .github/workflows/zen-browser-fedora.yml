@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           api_url="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
-          json=$(curl -fsSL "$api_url")
+          json=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "$api_url")
           tag=$(printf '%s' "$json" | jq -r '.tag_name')
           test -n "$tag" && test "$tag" != "null" || { echo 'Unable to determine upstream tag'; exit 1; }
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
@@ -116,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           upstream_latest='${{ steps.latest.outputs.tag }}'
-          self_json=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" || echo '{}')
+          self_json=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}/releases/latest" || echo '{}')
           self_tag=$(printf '%s' "$self_json" | jq -r '.tag_name // empty')
           force_rebuild='${{ github.event.inputs.force_rebuild || 'false' }}'
           echo "Last built: ${self_tag:-<none>}"
@@ -516,3 +516,4 @@ jobs:
           set -euo pipefail
           rm -f /tmp/gpg-passphrase /tmp/exported-pubkey.asc
           rm -rf ~/.gnupg
+
